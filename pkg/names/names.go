@@ -56,6 +56,9 @@ const KuryrOctaviaProviderAnnotation = "networkoperator.openshift.io/kuryr-octav
 // KuryrOctaviaVersionAnnotation is used to save latest Octavia version detected
 const KuryrOctaviaVersionAnnotation = "networkoperator.openshift.io/kuryr-octavia-version"
 
+// MachineConfigPoolLabel contains the pool a MachineConfig applies to
+const MachineConfigPoolLabel = "machineconfiguration.openshift.io/role"
+
 // MULTUS_VALIDATING_WEBHOOK is the name of the ValidatingWebhookConfiguration for multus-admission-controller
 // that is used in multus admission controller deployment
 const MULTUS_VALIDATING_WEBHOOK = "multus.openshift.io"

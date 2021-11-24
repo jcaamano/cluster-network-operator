@@ -10,27 +10,27 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
-// newPodReconciler returns a new reconcile.Reconciler
-func newPodReconciler(status *statusmanager.StatusManager) *ReconcilePods {
-	return &ReconcilePods{status: status}
+// newRolloutReconciler returns a new reconcile.Reconciler
+func newRolloutReconciler(status *statusmanager.StatusManager) *ReconcileRollout {
+	return &ReconcileRollout{status: status}
 }
 
-var _ reconcile.Reconciler = &ReconcilePods{}
+var _ reconcile.Reconciler = &ReconcileRollout{}
 
-// ReconcilePods watches for updates to specified resources and then updates its StatusManager
-type ReconcilePods struct {
+// ReconcileRollout watches for updates to specified resources and then updates its StatusManager
+type ReconcileRollout struct {
 	status *statusmanager.StatusManager
 
 	resources []types.NamespacedName
 }
 
-func (r *ReconcilePods) SetResources(resources []types.NamespacedName) {
+func (r *ReconcileRollout) SetResources(resources []types.NamespacedName) {
 	r.resources = resources
 }
 
 // Reconcile updates the ClusterOperator.Status to match the current state of the
-// watched Deployments/DaemonSets
-func (r *ReconcilePods) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
+// watched Deployments/DaemonSets/MachineConfigs/MachineConfigPools
+func (r *ReconcileRollout) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
 	found := false
 	for _, name := range r.resources {
 		if name.Namespace == request.Namespace && name.Name == request.Name {
@@ -43,7 +43,7 @@ func (r *ReconcilePods) Reconcile(ctx context.Context, request reconcile.Request
 	}
 
 	log.Printf("Reconciling update to %s/%s\n", request.Namespace, request.Name)
-	r.status.SetFromPods()
+	r.status.SetFromRollout()
 
 	return reconcile.Result{RequeueAfter: ResyncPeriod}, nil
 }

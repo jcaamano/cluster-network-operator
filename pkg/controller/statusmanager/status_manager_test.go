@@ -4,6 +4,7 @@ package statusmanager
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	operv1 "github.com/openshift/api/operator/v1"
 	"github.com/openshift/cluster-network-operator/pkg/names"
 	"github.com/openshift/library-go/pkg/operator/v1helpers"
+	mcfgv1 "github.com/openshift/machine-config-operator/pkg/apis/machineconfiguration.openshift.io/v1"
 
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
@@ -32,6 +34,7 @@ func init() {
 	configv1.AddToScheme(scheme.Scheme)
 	operv1.AddToScheme(scheme.Scheme)
 	appsv1.AddToScheme(scheme.Scheme)
+	mcfgv1.AddToScheme(scheme.Scheme)
 }
 
 func getCO(client client.Client, name string) (*configv1.ClusterOperator, error) {
@@ -376,7 +379,7 @@ func TestStatusManagerSetFromDaemonSets(t *testing.T) {
 		{Namespace: "two", Name: "beta"},
 	})
 
-	status.SetFromPods()
+	status.SetFromRollout()
 	co, oc, err := getStatuses(client, "testing")
 	if err != nil {
 		t.Fatalf("error getting ClusterOperator: %v", err)
@@ -419,7 +422,7 @@ func TestStatusManagerSetFromDaemonSets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error creating DaemonSet: %v", err)
 	}
-	status.SetFromPods()
+	status.SetFromRollout()
 
 	// Since the DaemonSet.Status reports no pods Available, the status should be Progressing
 	co, oc, err = getStatuses(client, "testing")
@@ -490,7 +493,7 @@ func TestStatusManagerSetFromDaemonSets(t *testing.T) {
 		if err != nil {
 			t.Fatalf("error updating DaemonSet: %v", err)
 		}
-		status.SetFromPods()
+		status.SetFromRollout()
 
 		co, oc, err = getStatuses(client, "testing")
 		if err != nil {
@@ -559,7 +562,7 @@ func TestStatusManagerSetFromDaemonSets(t *testing.T) {
 		t.Fatalf("error updating DaemonSet: %v", err)
 	}
 	time.Sleep(1 * time.Second) // minimum transition time fidelity
-	status.SetFromPods()
+	status.SetFromRollout()
 
 	co, oc, err = getStatuses(client, "testing")
 	if err != nil {
@@ -606,7 +609,7 @@ func TestStatusManagerSetFromDaemonSets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error updating DaemonSet: %v", err)
 	}
-	status.SetFromPods()
+	status.SetFromRollout()
 
 	co, oc, err = getStatuses(client, "testing")
 	if err != nil {
@@ -650,7 +653,7 @@ func TestStatusManagerSetFromDaemonSets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error updating DaemonSet: %v", err)
 	}
-	status.SetFromPods()
+	status.SetFromRollout()
 
 	co, oc, err = getStatuses(client, "testing")
 	if err != nil {
@@ -693,7 +696,7 @@ func TestStatusManagerSetFromDaemonSets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error updating DaemonSet: %v", err)
 	}
-	status.SetFromPods()
+	status.SetFromRollout()
 
 	co, oc, err = getStatuses(client, "testing")
 	if err != nil {
@@ -740,7 +743,7 @@ func TestStatusManagerSetFromDaemonSets(t *testing.T) {
 
 	t0 := time.Now()
 	time.Sleep(time.Second / 10)
-	status.SetFromPods()
+	status.SetFromRollout()
 
 	co, oc, err = getStatuses(client, "testing")
 	if err != nil {
@@ -771,7 +774,7 @@ func TestStatusManagerSetFromDaemonSets(t *testing.T) {
 	}
 
 	// See that the last pod state is reasonable
-	ps := getLastPodState(t, client, "testing")
+	ps := getLastRolloutState(t, client, "testing")
 	nsn := types.NamespacedName{Namespace: "one", Name: "alpha"}
 	found := false
 	for _, ds := range ps.DaemonsetStates {
@@ -793,15 +796,15 @@ func TestStatusManagerSetFromDaemonSets(t *testing.T) {
 
 	// intermission: set the last-update-time to an hour ago, make sure we
 	// set degraded (because the rollout is hung)
-	ps = getLastPodState(t, client, "testing")
+	ps = getLastRolloutState(t, client, "testing")
 	for idx, ds := range ps.DaemonsetStates {
 		if ds.NamespacedName == nsn {
 			ps.DaemonsetStates[idx].LastChangeTime = time.Now().Add(-time.Hour)
 			break
 		}
 	}
-	setLastPodState(t, client, "testing", ps)
-	status.SetFromPods()
+	setLastRolloutState(t, client, "testing", ps)
+	status.SetFromRollout()
 
 	co, oc, err = getStatuses(client, "testing")
 	if err != nil {
@@ -859,7 +862,7 @@ func TestStatusManagerSetFromDaemonSets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error updating DaemonSet: %v", err)
 	}
-	status.SetFromPods()
+	status.SetFromRollout()
 
 	// see that the pod state is sensible
 	co, oc, err = getStatuses(client, "testing")
@@ -923,7 +926,7 @@ func TestStatusManagerSetFromDaemonSets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error creating DaemonSet: %v", err)
 	}
-	status.SetFromPods()
+	status.SetFromRollout()
 
 	// We should now be Progressing, but not un-Available
 	co, oc, err = getStatuses(client, "testing")
@@ -955,7 +958,7 @@ func TestStatusManagerSetFromDaemonSets(t *testing.T) {
 	}
 
 	// Mark the rollout as hung; should not change anything
-	ps = getLastPodState(t, client, "testing")
+	ps = getLastRolloutState(t, client, "testing")
 	nsn = types.NamespacedName{Namespace: "one", Name: "non-critical"}
 	for idx, ds := range ps.DaemonsetStates {
 		if ds.NamespacedName == nsn {
@@ -963,8 +966,8 @@ func TestStatusManagerSetFromDaemonSets(t *testing.T) {
 			break
 		}
 	}
-	setLastPodState(t, client, "testing", ps)
-	status.SetFromPods()
+	setLastRolloutState(t, client, "testing", ps)
+	status.SetFromRollout()
 
 	co, oc, err = getStatuses(client, "testing")
 	if err != nil {
@@ -1007,7 +1010,7 @@ func TestStatusManagerSetFromDaemonSets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error updating DaemonSet: %v", err)
 	}
-	status.SetFromPods()
+	status.SetFromRollout()
 
 	co, oc, err = getStatuses(client, "testing")
 	if err != nil {
@@ -1051,7 +1054,7 @@ func TestStatusManagerSetFromDeployments(t *testing.T) {
 		{Namespace: "one", Name: "alpha"},
 	})
 
-	status.SetFromPods()
+	status.SetFromRollout()
 
 	co, oc, err := getStatuses(client, "testing")
 	if err != nil {
@@ -1086,7 +1089,7 @@ func TestStatusManagerSetFromDeployments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error creating Deployment: %v", err)
 	}
-	status.SetFromPods()
+	status.SetFromRollout()
 
 	co, oc, err = getStatuses(client, "testing")
 	if err != nil {
@@ -1111,7 +1114,7 @@ func TestStatusManagerSetFromDeployments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error creating Deployment: %v", err)
 	}
-	status.SetFromPods()
+	status.SetFromRollout()
 
 	co, oc, err = getStatuses(client, "testing")
 	if err != nil {
@@ -1159,7 +1162,7 @@ func TestStatusManagerSetFromDeployments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error updating Deployment: %v", err)
 	}
-	status.SetFromPods()
+	status.SetFromRollout()
 
 	co, oc, err = getStatuses(client, "testing")
 	if err != nil {
@@ -1212,7 +1215,7 @@ func TestStatusManagerSetFromDeployments(t *testing.T) {
 
 	t0 := time.Now()
 	time.Sleep(time.Second / 10)
-	status.SetFromPods()
+	status.SetFromRollout()
 
 	co, oc, err = getStatuses(client, "testing")
 	if err != nil {
@@ -1245,7 +1248,7 @@ func TestStatusManagerSetFromDeployments(t *testing.T) {
 		t.Fatalf("unexpected Status.Versions: %#v", co.Status.Versions)
 	}
 
-	ps := getLastPodState(t, client, "testing")
+	ps := getLastRolloutState(t, client, "testing")
 	// see that the pod state is sensible
 	nsn := types.NamespacedName{Namespace: "one", Name: "beta"}
 	found := false
@@ -1268,15 +1271,15 @@ func TestStatusManagerSetFromDeployments(t *testing.T) {
 
 	// intermission: set back last-seen times by an hour, see that we mark
 	// as hung
-	ps = getLastPodState(t, client, "testing")
+	ps = getLastRolloutState(t, client, "testing")
 	for idx, ds := range ps.DeploymentStates {
 		if ds.NamespacedName == nsn {
 			ps.DeploymentStates[idx].LastChangeTime = time.Now().Add(-time.Hour)
 			break
 		}
 	}
-	setLastPodState(t, client, "testing", ps)
-	status.SetFromPods()
+	setLastRolloutState(t, client, "testing", ps)
+	status.SetFromRollout()
 
 	co, oc, err = getStatuses(client, "testing")
 	if err != nil {
@@ -1324,7 +1327,7 @@ func TestStatusManagerSetFromDeployments(t *testing.T) {
 		t.Fatalf("error updating Deployment: %v", err)
 	}
 
-	status.SetFromPods()
+	status.SetFromRollout()
 
 	co, oc, err = getStatuses(client, "testing")
 	if err != nil {
@@ -1355,7 +1358,454 @@ func TestStatusManagerSetFromDeployments(t *testing.T) {
 	}
 }
 
-func getLastPodState(t *testing.T, client client.Client, name string) podState {
+func TestStatusManagerSetFromMachineConfigs(t *testing.T) {
+	client := fake.NewClientBuilder().WithRuntimeObjects().Build()
+	mapper := &fakeRESTMapper{}
+	status := New(client, mapper, "testing")
+	no := &operv1.Network{ObjectMeta: metav1.ObjectMeta{Name: names.OPERATOR_CONFIG}}
+	if err := client.Create(context.TODO(), no); err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	mcAName := types.NamespacedName{Namespace: "one", Name: "alpha"}
+	status.SetMachineConfigs([]types.NamespacedName{mcAName})
+
+	status.SetFromRollout()
+
+	co, oc, err := getStatuses(client, "testing")
+	if err != nil {
+		t.Fatalf("error getting ClusterOperator: %v", err)
+	}
+	if !conditionsInclude(oc.Status.Conditions, []operv1.OperatorCondition{
+		{
+			Type:    operv1.OperatorStatusTypeProgressing,
+			Status:  operv1.ConditionTrue,
+			Reason:  "Deploying",
+			Message: fmt.Sprintf("Waiting for MachineConfig %q to be created", mcAName.String()),
+		},
+	}) {
+		t.Fatalf("unexpected Status.Conditions: %#v", oc.Status.Conditions)
+	}
+	if len(co.Status.Versions) > 0 {
+		t.Fatalf("Status.Versions unexpectedly already set: %#v", co.Status.Versions)
+	}
+
+	// Create a MachineConfig that isn't the one we're looking for
+	mcBName := types.NamespacedName{Namespace: "one", Name: "beta"}
+	mcB := &mcfgv1.MachineConfig{
+		ObjectMeta: metav1.ObjectMeta{Namespace: mcBName.Namespace, Name: mcBName.Name},
+		Spec:       mcfgv1.MachineConfigSpec{},
+	}
+	err = client.Create(context.TODO(), mcB)
+	if err != nil {
+		t.Fatalf("error creating MachineConfig: %v", err)
+	}
+	status.SetFromRollout()
+
+	co, oc, err = getStatuses(client, "testing")
+	if err != nil {
+		t.Fatalf("error getting ClusterOperator: %v", err)
+	}
+	if !conditionsInclude(oc.Status.Conditions, []operv1.OperatorCondition{
+		{
+			Type:    operv1.OperatorStatusTypeProgressing,
+			Status:  operv1.ConditionTrue,
+			Reason:  "Deploying",
+			Message: fmt.Sprintf("Waiting for MachineConfig %q to be created", mcAName.String()),
+		},
+	}) {
+		t.Fatalf("unexpected Status.Conditions: %#v", oc.Status.Conditions)
+	}
+	if len(co.Status.Versions) > 0 {
+		t.Fatalf("Status.Versions unexpectedly already set: %#v", co.Status.Versions)
+	}
+
+	// Create minimal MachineConfig
+	mcA := &mcfgv1.MachineConfig{ObjectMeta: metav1.ObjectMeta{Namespace: mcAName.Namespace, Name: mcAName.Name}}
+	err = client.Create(context.TODO(), mcA)
+	if err != nil {
+		t.Fatalf("error creating MachineConfig: %v", err)
+	}
+	status.SetFromRollout()
+
+	co, oc, err = getStatuses(client, "testing")
+	if err != nil {
+		t.Fatalf("error getting ClusterOperator: %v", err)
+	}
+	if !conditionsInclude(oc.Status.Conditions, []operv1.OperatorCondition{
+		{
+			Type:   operv1.OperatorStatusTypeDegraded,
+			Status: operv1.ConditionFalse,
+		},
+		{
+			Type:    operv1.OperatorStatusTypeProgressing,
+			Status:  operv1.ConditionTrue,
+			Reason:  "Deploying",
+			Message: fmt.Sprintf("Waiting for MachineConfig %q to have a MachineConfigPool assigned", mcAName.String()),
+		},
+		{
+			Type:   operv1.OperatorStatusTypeUpgradeable,
+			Status: operv1.ConditionTrue,
+		},
+		{
+			Type:   operv1.OperatorStatusTypeAvailable,
+			Status: operv1.ConditionFalse,
+			Reason: "Startup",
+		},
+	}) {
+		t.Fatalf("unexpected Status.Conditions: %#v", oc.Status.Conditions)
+	}
+	if len(co.Status.Versions) > 0 {
+		t.Fatalf("Status.Versions unexpectedly already set: %#v", co.Status.Versions)
+	}
+
+	// Set MachineConfigPool label
+	err = client.Get(context.TODO(), mcAName, mcA)
+	if err != nil {
+		t.Fatalf("error getting MachineConfig: %v", err)
+	}
+
+	mcpAName := types.NamespacedName{Name: "alpha"}
+	mcA.Labels = map[string]string{
+		names.MachineConfigPoolLabel: mcpAName.Name,
+	}
+	err = client.Update(context.TODO(), mcA)
+	if err != nil {
+		t.Fatalf("error updating MAchineConfig: %v", err)
+	}
+	status.SetFromRollout()
+
+	co, oc, err = getStatuses(client, "testing")
+	if err != nil {
+		t.Fatalf("error getting ClusterOperator: %v", err)
+	}
+	if !conditionsInclude(oc.Status.Conditions, []operv1.OperatorCondition{
+		{
+			Type:   operv1.OperatorStatusTypeDegraded,
+			Status: operv1.ConditionFalse,
+		},
+		{
+			Type:    operv1.OperatorStatusTypeProgressing,
+			Status:  operv1.ConditionTrue,
+			Reason:  "Deploying",
+			Message: fmt.Sprintf("Waiting for MachineConfigPool %q of MachineConfig %q to be created", mcpAName.Name, mcAName.String()),
+		},
+		{
+			Type:   operv1.OperatorStatusTypeUpgradeable,
+			Status: operv1.ConditionTrue,
+		},
+		{
+			Type:   operv1.OperatorStatusTypeAvailable,
+			Status: operv1.ConditionFalse,
+			Reason: "Startup",
+		},
+	}) {
+		t.Fatalf("unexpected Status.Conditions: %#v", oc.Status.Conditions)
+	}
+	if len(co.Status.Versions) > 0 {
+		t.Fatalf("unexpected Status.Versions: %#v", co.Status.Versions)
+	}
+
+	// Create minimal MachineConfigPool
+	mcpA := &mcfgv1.MachineConfigPool{ObjectMeta: metav1.ObjectMeta{Name: mcpAName.Name}}
+	err = client.Create(context.TODO(), mcpA)
+	if err != nil {
+		t.Fatalf("error creating MachineConfigPool: %v", err)
+	}
+	status.SetFromRollout()
+
+	co, oc, err = getStatuses(client, "testing")
+	if err != nil {
+		t.Fatalf("error getting ClusterOperator: %v", err)
+	}
+	if !conditionsInclude(oc.Status.Conditions, []operv1.OperatorCondition{
+		{
+			Type:   operv1.OperatorStatusTypeDegraded,
+			Status: operv1.ConditionFalse,
+		},
+		{
+			Type:    operv1.OperatorStatusTypeProgressing,
+			Status:  operv1.ConditionTrue,
+			Reason:  "Deploying",
+			Message: fmt.Sprintf("MachineConfig %q is not yet sourced by MachineConfigPool %q", mcAName.String(), mcpAName.Name),
+		},
+		{
+			Type:   operv1.OperatorStatusTypeUpgradeable,
+			Status: operv1.ConditionTrue,
+		},
+		{
+			Type:   operv1.OperatorStatusTypeAvailable,
+			Status: operv1.ConditionFalse,
+			Reason: "Startup",
+		},
+	}) {
+		t.Fatalf("unexpected Status.Conditions: %#v", oc.Status.Conditions)
+	}
+	if len(co.Status.Versions) > 0 {
+		t.Fatalf("unexpected Status.Versions: %#v", co.Status.Versions)
+	}
+
+	// Update MachineConfigPool to source MachineConfig
+	err = client.Get(context.TODO(), mcpAName, mcpA)
+	if err != nil {
+		t.Fatalf("error getting MachineConfig: %v", err)
+	}
+
+	mcpA.Spec = mcfgv1.MachineConfigPoolSpec{
+		Configuration: mcfgv1.MachineConfigPoolStatusConfiguration{
+			Source: []v1.ObjectReference{
+				{
+					Kind:      "MachineConfig",
+					Namespace: mcAName.Namespace,
+					Name:      mcA.Name,
+				},
+			},
+		},
+	}
+	mcpA.Status = mcfgv1.MachineConfigPoolStatus{
+		MachineCount:        3,
+		UpdatedMachineCount: 2,
+		ReadyMachineCount:   2,
+	}
+	err = client.Update(context.TODO(), mcpA)
+	if err != nil {
+		t.Fatalf("error updating MAchineConfig: %v", err)
+	}
+	status.SetFromRollout()
+
+	co, oc, err = getStatuses(client, "testing")
+	if err != nil {
+		t.Fatalf("error getting ClusterOperator: %v", err)
+	}
+	if !conditionsInclude(oc.Status.Conditions, []operv1.OperatorCondition{
+		{
+			Type:   operv1.OperatorStatusTypeDegraded,
+			Status: operv1.ConditionFalse,
+		},
+		{
+			Type:    operv1.OperatorStatusTypeProgressing,
+			Status:  operv1.ConditionTrue,
+			Reason:  "Deploying",
+			Message: fmt.Sprintf("MachineConfig %q is being rolled out by MachineConfigPool %q", mcAName.String(), mcpA.Name),
+		},
+		{
+			Type:   operv1.OperatorStatusTypeUpgradeable,
+			Status: operv1.ConditionTrue,
+		},
+		{
+			Type:   operv1.OperatorStatusTypeAvailable,
+			Status: operv1.ConditionFalse,
+			Reason: "Startup",
+		},
+	}) {
+		t.Fatalf("unexpected Status.Conditions: %#v", oc.Status.Conditions)
+	}
+	if len(co.Status.Versions) > 0 {
+		t.Fatalf("unexpected Status.Versions: %#v", co.Status.Versions)
+	}
+
+	// Update MachineConfigPool to set updated but not ready
+	err = client.Get(context.TODO(), mcpAName, mcpA)
+	if err != nil {
+		t.Fatalf("error getting MachineConfig: %v", err)
+	}
+
+	mcpA.Status.UpdatedMachineCount = 3
+	err = client.Update(context.TODO(), mcpA)
+	if err != nil {
+		t.Fatalf("error updating MAchineConfig: %v", err)
+	}
+
+	// Wait 10 seconds and check status again
+	t0 := time.Now()
+	time.Sleep(time.Second / 10)
+	status.SetFromRollout()
+
+	co, oc, err = getStatuses(client, "testing")
+	if err != nil {
+		t.Fatalf("error getting ClusterOperator: %v", err)
+	}
+	if !conditionsInclude(oc.Status.Conditions, []operv1.OperatorCondition{
+		{
+			Type:   operv1.OperatorStatusTypeDegraded,
+			Status: operv1.ConditionFalse,
+		},
+		{
+			Type:    operv1.OperatorStatusTypeProgressing,
+			Status:  operv1.ConditionTrue,
+			Reason:  "Deploying",
+			Message: fmt.Sprintf("MachineConfig %q is being rolled out by MachineConfigPool %q", mcAName.String(), mcpA.Name),
+		},
+		{
+			Type:   operv1.OperatorStatusTypeUpgradeable,
+			Status: operv1.ConditionTrue,
+		},
+		{
+			Type:   operv1.OperatorStatusTypeAvailable,
+			Status: operv1.ConditionFalse,
+			Reason: "Startup",
+		},
+	}) {
+		t.Fatalf("unexpected Status.Conditions: %#v", oc.Status.Conditions)
+	}
+	if len(co.Status.Versions) > 0 {
+		t.Fatalf("unexpected Status.Versions: %#v", co.Status.Versions)
+	}
+
+	// see that the MachineConfigPool state is sensible
+	ps := getLastRolloutState(t, client, "testing")
+	found := false
+	for _, mcps := range ps.MachineConfigPoolStates {
+		if mcps.NamespacedName == mcpAName {
+			found = true
+			if !mcps.LastChangeTime.After(t0) {
+				t.Fatalf("Expected %s to be after %s", mcps.LastChangeTime, t0)
+			}
+			if !reflect.DeepEqual(mcpA.Status, mcps.LastSeenStatus) {
+				t.Fatal("expected cached status to equal last seen status")
+			}
+
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("Didn't find %s in rollout state", mcpAName)
+	}
+
+	// intermission: set back last-seen times by an hour, see that we mark
+	// as hung
+	ps = getLastRolloutState(t, client, "testing")
+	for idx, mcps := range ps.MachineConfigPoolStates {
+		if mcps.NamespacedName == mcpAName {
+			ps.MachineConfigPoolStates[idx].LastChangeTime = time.Now().Add(-time.Hour)
+			break
+		}
+	}
+	setLastRolloutState(t, client, "testing", ps)
+	status.SetFromRollout()
+
+	co, oc, err = getStatuses(client, "testing")
+	if err != nil {
+		t.Fatalf("error getting ClusterOperator: %v", err)
+	}
+	// We should still be Progressing, since nothing else has changed, but
+	// now we're also Degraded, since rollout has not made any progress
+	if !conditionsInclude(oc.Status.Conditions, []operv1.OperatorCondition{
+		{
+			Type:   operv1.OperatorStatusTypeDegraded,
+			Status: operv1.ConditionTrue,
+		},
+		{
+			Type:   operv1.OperatorStatusTypeProgressing,
+			Status: operv1.ConditionTrue,
+		},
+		{
+			Type:   operv1.OperatorStatusTypeUpgradeable,
+			Status: operv1.ConditionTrue,
+		},
+		{
+			Type:   operv1.OperatorStatusTypeAvailable,
+			Status: operv1.ConditionFalse,
+		},
+	}) {
+		t.Fatalf("unexpected Status.Conditions: %#v", oc.Status.Conditions)
+	}
+	if len(co.Status.Versions) > 0 {
+		t.Fatalf("unexpected Status.Versions: %#v", co.Status.Versions)
+	}
+
+	// Update MachineConfigPool to set ready
+	err = client.Get(context.TODO(), mcpAName, mcpA)
+	if err != nil {
+		t.Fatalf("error getting MachineConfig: %v", err)
+	}
+
+	mcpA.Status.ReadyMachineCount = 3
+	err = client.Update(context.TODO(), mcpA)
+	if err != nil {
+		t.Fatalf("error updating MAchineConfig: %v", err)
+	}
+
+	status.SetFromRollout()
+	co, oc, err = getStatuses(client, "testing")
+	if err != nil {
+		t.Fatalf("error getting ClusterOperator: %v", err)
+	}
+	// We should still be Progressing, since nothing else has changed, but
+	// now we're also Degraded, since rollout has not made any progress
+	if !conditionsInclude(oc.Status.Conditions, []operv1.OperatorCondition{
+		{
+			Type:   operv1.OperatorStatusTypeDegraded,
+			Status: operv1.ConditionFalse,
+		},
+		{
+			Type:   operv1.OperatorStatusTypeProgressing,
+			Status: operv1.ConditionFalse,
+		},
+		{
+			Type:   operv1.OperatorStatusTypeUpgradeable,
+			Status: operv1.ConditionTrue,
+		},
+		{
+			Type:   operv1.OperatorStatusTypeAvailable,
+			Status: operv1.ConditionTrue,
+		},
+	}) {
+		t.Fatalf("unexpected Status.Conditions: %#v", oc.Status.Conditions)
+	}
+	if len(co.Status.Versions) != 1 {
+		t.Fatalf("unexpected Status.Versions: %#v", co.Status.Versions)
+	}
+
+	// Add MachineConfig B
+	err = client.Get(context.TODO(), mcBName, mcB)
+	if err != nil {
+		t.Fatalf("error getting MachineConfig: %v", err)
+	}
+
+	mcB.Labels = map[string]string{
+		names.MachineConfigPoolLabel: mcpAName.Name,
+	}
+	err = client.Update(context.TODO(), mcB)
+	if err != nil {
+		t.Fatalf("error updating MAchineConfig: %v", err)
+	}
+
+	status.SetMachineConfigs([]types.NamespacedName{mcAName, mcBName})
+	status.SetFromRollout()
+
+	co, oc, err = getStatuses(client, "testing")
+	if err != nil {
+		t.Fatalf("error getting ClusterOperator: %v", err)
+	}
+	if !conditionsInclude(oc.Status.Conditions, []operv1.OperatorCondition{
+		{
+			Type:   operv1.OperatorStatusTypeDegraded,
+			Status: operv1.ConditionFalse,
+		},
+		{
+			Type:    operv1.OperatorStatusTypeProgressing,
+			Status:  operv1.ConditionTrue,
+			Reason:  "Deploying",
+			Message: fmt.Sprintf("MachineConfig %q is not yet sourced by MachineConfigPool %q", mcBName.String(), mcpAName.Name),
+		},
+		{
+			Type:   operv1.OperatorStatusTypeUpgradeable,
+			Status: operv1.ConditionTrue,
+		},
+		{
+			Type:   operv1.OperatorStatusTypeAvailable,
+			Status: operv1.ConditionTrue,
+		},
+	}) {
+		t.Fatalf("unexpected Status.Conditions: %#v", oc.Status.Conditions)
+	}
+	if len(co.Status.Versions) != 1 {
+		t.Fatalf("unexpected Status.Versions: %#v", co.Status.Versions)
+	}
+}
+
+func getLastRolloutState(t *testing.T, client client.Client, name string) rolloutState {
 	t.Helper()
 	co, err := getCO(client, name)
 	if err != nil {
@@ -1363,7 +1813,7 @@ func getLastPodState(t *testing.T, client client.Client, name string) podState {
 	}
 	t.Log(co.Annotations)
 
-	ps := podState{}
+	ps := rolloutState{}
 	if err := json.Unmarshal([]byte(co.Annotations[lastSeenAnnotation]), &ps); err != nil {
 		t.Fatal(err)
 	}
@@ -1372,7 +1822,7 @@ func getLastPodState(t *testing.T, client client.Client, name string) podState {
 }
 
 // sets *all* last-seen-times back an hour
-func setLastPodState(t *testing.T, client client.Client, name string, ps podState) {
+func setLastRolloutState(t *testing.T, client client.Client, name string, ps rolloutState) {
 	t.Helper()
 	co, err := getCO(client, name)
 	if err != nil {
@@ -1539,7 +1989,7 @@ func TestStatusManagerCheckCrashLoopBackOffPods(t *testing.T) {
 		t.Fatalf("error creating Pod: %v", err)
 	}
 
-	status.SetFromPods()
+	status.SetFromRollout()
 
 	oc, err := getOC(client)
 	if err != nil {
@@ -1611,7 +2061,7 @@ func TestStatusManagerCheckCrashLoopBackOffPods(t *testing.T) {
 		t.Fatalf("error creating Pod: %v", err)
 	}
 
-	status.SetFromPods()
+	status.SetFromRollout()
 	oc, err = getOC(client)
 	if err != nil {
 		t.Fatalf("error getting ClusterOperator: %v", err)

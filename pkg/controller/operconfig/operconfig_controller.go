@@ -15,6 +15,7 @@ import (
 	"github.com/openshift/cluster-network-operator/pkg/controller/statusmanager"
 	"github.com/openshift/cluster-network-operator/pkg/names"
 	"github.com/openshift/cluster-network-operator/pkg/network"
+	mcfgv1 "github.com/openshift/machine-config-operator/pkg/apis/machineconfiguration.openshift.io/v1"
 
 	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -50,11 +51,11 @@ func Add(mgr manager.Manager, status *statusmanager.StatusManager) error {
 // newReconciler returns a new reconcile.Reconciler
 func newReconciler(mgr manager.Manager, status *statusmanager.StatusManager) *ReconcileOperConfig {
 	return &ReconcileOperConfig{
-		client:        mgr.GetClient(),
-		scheme:        mgr.GetScheme(),
-		status:        status,
-		mapper:        mgr.GetRESTMapper(),
-		podReconciler: newPodReconciler(status),
+		client:            mgr.GetClient(),
+		scheme:            mgr.GetScheme(),
+		status:            status,
+		mapper:            mgr.GetRESTMapper(),
+		rolloutReconciler: newRolloutReconciler(status),
 	}
 }
 
@@ -72,8 +73,8 @@ func add(mgr manager.Manager, r *ReconcileOperConfig) error {
 		return err
 	}
 
-	// Likewise for the Pod reconciler
-	c, err = controller.New("pod-controller", mgr, controller.Options{Reconciler: r.podReconciler})
+	// Likewise for the rollout reconciler
+	c, err = controller.New("rollout-controller", mgr, controller.Options{Reconciler: r.rolloutReconciler})
 	if err != nil {
 		return err
 	}
@@ -82,6 +83,14 @@ func add(mgr manager.Manager, r *ReconcileOperConfig) error {
 		return err
 	}
 	err = c.Watch(&source.Kind{Type: &appsv1.Deployment{}}, &handler.EnqueueRequestForObject{})
+	if err != nil {
+		return err
+	}
+	err = c.Watch(&source.Kind{Type: &mcfgv1.MachineConfig{}}, &handler.EnqueueRequestForObject{})
+	if err != nil {
+		return err
+	}
+	err = c.Watch(&source.Kind{Type: &mcfgv1.MachineConfigPool{}}, &handler.EnqueueRequestForObject{})
 	if err != nil {
 		return err
 	}
@@ -95,11 +104,11 @@ var _ reconcile.Reconciler = &ReconcileOperConfig{}
 type ReconcileOperConfig struct {
 	// This client, initialized using mgr.Client() above, is a split client
 	// that reads objects from the cache and writes to the apiserver
-	client        client.Client
-	scheme        *runtime.Scheme
-	status        *statusmanager.StatusManager
-	mapper        meta.RESTMapper
-	podReconciler *ReconcilePods
+	client            client.Client
+	scheme            *runtime.Scheme
+	status            *statusmanager.StatusManager
+	mapper            meta.RESTMapper
+	rolloutReconciler *ReconcileRollout
 }
 
 // Reconcile updates the state of the cluster to match that which is desired
@@ -228,12 +237,15 @@ func (r *ReconcileOperConfig) Reconcile(ctx context.Context, request reconcile.R
 	// Set up the Pod reconciler before we start creating DaemonSets/Deployments
 	daemonSets := []types.NamespacedName{}
 	deployments := []types.NamespacedName{}
+	machineConfigs := []types.NamespacedName{}
 	relatedObjects := []configv1.ObjectReference{}
 	for _, obj := range objs {
 		if obj.GetAPIVersion() == "apps/v1" && obj.GetKind() == "DaemonSet" {
 			daemonSets = append(daemonSets, types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()})
 		} else if obj.GetAPIVersion() == "apps/v1" && obj.GetKind() == "Deployment" {
 			deployments = append(deployments, types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()})
+		} else if obj.GetAPIVersion() == "machineconfiguration.openshift.io/v1" && obj.GetKind() == "MachineConfig" {
+			machineConfigs = append(machineConfigs, types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()})
 		}
 		restMapping, err := r.mapper.RESTMapping(obj.GroupVersionKind().GroupKind())
 		if err != nil {
@@ -278,12 +290,8 @@ func (r *ReconcileOperConfig) Reconcile(ctx context.Context, request reconcile.R
 
 	r.status.SetDaemonSets(daemonSets)
 	r.status.SetDeployments(deployments)
+	r.status.SetMachineConfigs(machineConfigs)
 	r.status.SetRelatedObjects(relatedObjects)
-
-	allResources := []types.NamespacedName{}
-	allResources = append(allResources, daemonSets...)
-	allResources = append(allResources, deployments...)
-	r.podReconciler.SetResources(allResources)
 
 	// Apply the objects to the cluster
 	for _, obj := range objs {
@@ -315,8 +323,9 @@ func (r *ReconcileOperConfig) Reconcile(ctx context.Context, request reconcile.R
 		}
 	}
 
-	// Run a pod status check just to clear any initial inconsitencies at startup of the CNO
-	r.status.SetFromPods()
+	// Run a rollout status check just to clear any initial inconsistencies at startup of the CNO
+	resources := r.status.SetFromRollout()
+	r.rolloutReconciler.SetResources(resources)
 
 	// Update Network.config.openshift.io.Status
 	status, err := r.ClusterNetworkStatus(context.TODO(), operConfig)

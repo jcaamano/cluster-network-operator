@@ -13,6 +13,7 @@ import (
 	configv1 "github.com/openshift/api/config/v1"
 	operv1 "github.com/openshift/api/operator/v1"
 	"github.com/openshift/cluster-network-operator/pkg/names"
+	mcfgv1 "github.com/openshift/machine-config-operator/pkg/apis/machineconfiguration.openshift.io/v1"
 
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
@@ -32,12 +33,13 @@ const (
 	lastSeenAnnotation = "network.operator.openshift.io/last-seen-state"
 )
 
-// podState is a snapshot of the last-seen-state and last-changed-times
+// rolloutState is a snapshot of the last-seen-state and last-changed-times
 // for pod-creating entities, as marshalled to json in an annotation
-type podState struct {
+type rolloutState struct {
 	// "public" for marshalling to json, since we can't have complex keys
-	DaemonsetStates  []daemonsetState
-	DeploymentStates []deploymentState
+	DaemonsetStates         []daemonsetState
+	DeploymentStates        []deploymentState
+	MachineConfigPoolStates []machineConfigPoolState
 }
 
 // daemonsetState is the internal state we use to check if a rollout has
@@ -57,21 +59,31 @@ type deploymentState struct {
 	LastChangeTime time.Time
 }
 
-// SetFromPods sets the operator Degraded/Progressing/Available status, based on
-// the current status of the manager's DaemonSets and Deployments.
-func (status *StatusManager) SetFromPods() {
+// machineConfigPoolState is the same as daemonsetState.. but for machine config pools!
+type machineConfigPoolState struct {
+	types.NamespacedName
+
+	LastSeenStatus mcfgv1.MachineConfigPoolStatus
+	LastChangeTime time.Time
+}
+
+// SetFromRollout sets the operator Degraded/Progressing/Available status, based on
+// the current status of the manager's DaemonSets, Deployments and MachineConfigs.
+func (status *StatusManager) SetFromRollout() []types.NamespacedName {
 	status.Lock()
 	defer status.Unlock()
 
 	targetLevel := os.Getenv("RELEASE_VERSION")
-	reachedAvailableLevel := (len(status.daemonSets) + len(status.deployments)) > 0
+	reachedAvailableLevel := (len(status.daemonSets)+len(status.deployments))+len(status.machineConfigs) > 0
 
+	resources := []types.NamespacedName{}
 	progressing := []string{}
 	hung := []string{}
 
-	daemonsetStates, deploymentStates := status.getLastPodState()
+	daemonsetStates, deploymentStates, machineConfigPoolStates := status.getLastRolloutState()
 
 	for _, dsName := range status.daemonSets {
+		resources = append(resources, dsName)
 		ds := &appsv1.DaemonSet{}
 		if err := status.client.Get(context.TODO(), dsName, ds); err != nil {
 			log.Printf("Error getting DaemonSet %q: %v", dsName.String(), err)
@@ -136,6 +148,7 @@ func (status *StatusManager) SetFromPods() {
 	}
 
 	for _, depName := range status.deployments {
+		resources = append(resources, depName)
 		dep := &appsv1.Deployment{}
 		if err := status.client.Get(context.TODO(), depName, dep); err != nil {
 			log.Printf("Error getting Deployment %q: %v", depName.String(), err)
@@ -196,9 +209,82 @@ func (status *StatusManager) SetFromPods() {
 		}
 	}
 
+	// CNO might render MachineConfigs so its status is derived from the status
+	// of the MachineConfigPool associated to those MachineConfigs.
+	observedMachineConfigPools := map[types.NamespacedName]bool{}
+	for _, mcName := range status.machineConfigs {
+		resources = append(resources, mcName)
+		mc := &mcfgv1.MachineConfig{}
+		if err := status.client.Get(context.TODO(), mcName, mc); err != nil {
+			log.Printf("Error getting MachineConfig %q: %v", mcName.String(), err)
+			reachedAvailableLevel = false
+			progressing = append(progressing, fmt.Sprintf("Waiting for MachineConfig %q to be created", mcName.String()))
+			continue
+		}
+
+		mcpName, isAssignedToPool := mc.Labels[names.MachineConfigPoolLabel]
+		if !isAssignedToPool {
+			reachedAvailableLevel = false
+			progressing = append(progressing, fmt.Sprintf("Waiting for MachineConfig %q to have a MachineConfigPool assigned", mcName.String()))
+			continue
+		}
+
+		mcpNamespacedName := types.NamespacedName{Name: mcpName}
+		resources = append(resources, mcpNamespacedName)
+		mcp := &mcfgv1.MachineConfigPool{}
+		if err := status.client.Get(context.TODO(), mcpNamespacedName, mcp); err != nil {
+			log.Printf("Error getting MachineConfigPool %q: %v", mcpName, err)
+			reachedAvailableLevel = false
+			progressing = append(progressing, fmt.Sprintf("Waiting for MachineConfigPool %q of MachineConfig %q to be created", mcpName, mcName.String()))
+			continue
+		}
+
+		var isSourcedByPool bool
+		for _, obj := range mcp.Spec.Configuration.Source {
+			if obj.Kind == "MachineConfig" && obj.Namespace == mc.Namespace && obj.Name == mc.Name {
+				isSourcedByPool = true
+				break
+			}
+		}
+
+		var mcProgressing bool
+		if !isSourcedByPool {
+			mcProgressing = true
+			progressing = append(progressing, fmt.Sprintf("MachineConfig %q is not yet sourced by MachineConfigPool %q", mcName.String(), mcpName))
+		} else if mcp.Status.UpdatedMachineCount < mcp.Status.MachineCount || mcp.Status.ReadyMachineCount < mcp.Status.MachineCount {
+			mcProgressing = true
+			progressing = append(progressing, fmt.Sprintf("MachineConfig %q is being rolled out by MachineConfigPool %q", mcName.String(), mcpName))
+		}
+
+		if mc.Annotations["release.openshift.io/version"] != targetLevel {
+			reachedAvailableLevel = false
+		}
+
+		if mcProgressing && !isNonCritical(mc) {
+			reachedAvailableLevel = false
+			observedMachineConfigPools[mcpNamespacedName] = true
+			mcpState, exists := machineConfigPoolStates[mcpNamespacedName]
+			if !exists || !reflect.DeepEqual(mcpState.LastSeenStatus, mcp.Status) {
+				mcpState.LastChangeTime = time.Now()
+				mcp.Status.DeepCopyInto(&mcpState.LastSeenStatus)
+				machineConfigPoolStates[mcpNamespacedName] = mcpState
+			}
+
+			// Catch hung rollouts
+			if exists && (time.Since(mcpState.LastChangeTime)) > ProgressTimeout {
+				hung = append(hung, fmt.Sprintf("MachineConfig %q rollout via MachineConfigPool %q is not making progress - last change %s", mcName.String(), mcpName, mcpState.LastChangeTime.Format(time.RFC3339)))
+			}
+		}
+	}
+	for mcpNamespacedName := range machineConfigPoolStates {
+		if !observedMachineConfigPools[mcpNamespacedName] {
+			delete(machineConfigPoolStates, mcpNamespacedName)
+		}
+	}
+
 	status.setNotDegraded(PodDeployment)
-	if err := status.setLastPodState(daemonsetStates, deploymentStates); err != nil {
-		log.Printf("Failed to set pod state (continuing): %+v\n", err)
+	if err := status.setLastRolloutState(daemonsetStates, deploymentStates, machineConfigPoolStates); err != nil {
+		log.Printf("Failed to set rollout state (continuing): %+v\n", err)
 	}
 
 	conditions := make([]operv1.OperatorCondition, 0, 2)
@@ -238,35 +324,39 @@ func (status *StatusManager) SetFromPods() {
 	} else {
 		status.setNotDegraded(RolloutHung)
 	}
+
+	return resources
 }
 
-// getLastPodState reads the last-seen daemonset + deployment state
-// from the clusteroperator annotation and parses it. On error, it returns
-// an empty state, since this should not block updating operator status.
-func (status *StatusManager) getLastPodState() (map[types.NamespacedName]daemonsetState, map[types.NamespacedName]deploymentState) {
+// getLastRolloutState reads the last-seen daemonset, deployment and machine
+// config pool state from the clusteroperator annotation and parses it. On
+// error, it returns an empty state, since this should not block updating
+// operator status.
+func (status *StatusManager) getLastRolloutState() (map[types.NamespacedName]daemonsetState, map[types.NamespacedName]deploymentState, map[types.NamespacedName]machineConfigPoolState) {
 	// with maps allocated
 	daemonsetStates := map[types.NamespacedName]daemonsetState{}
 	deploymentStates := map[types.NamespacedName]deploymentState{}
+	machineConfigPoolStates := map[types.NamespacedName]machineConfigPoolState{}
 
 	// Load the last-seen snapshot from our annotation
 	co := &configv1.ClusterOperator{ObjectMeta: metav1.ObjectMeta{Name: status.name}}
 	err := status.client.Get(context.TODO(), types.NamespacedName{Name: status.name}, co)
 	if err != nil {
 		log.Printf("Failed to get ClusterOperator: %v", err)
-		return daemonsetStates, deploymentStates
+		return daemonsetStates, deploymentStates, machineConfigPoolStates
 	}
 
 	lsbytes := co.Annotations[lastSeenAnnotation]
 	if lsbytes == "" {
-		return daemonsetStates, deploymentStates
+		return daemonsetStates, deploymentStates, machineConfigPoolStates
 	}
 
-	out := podState{}
+	out := rolloutState{}
 	err = json.Unmarshal([]byte(lsbytes), &out)
 	if err != nil {
 		// No need to return error; just move on
 		log.Printf("failed to unmashal last-seen-status: %v", err)
-		return daemonsetStates, deploymentStates
+		return daemonsetStates, deploymentStates, machineConfigPoolStates
 	}
 
 	for _, ds := range out.DaemonsetStates {
@@ -277,16 +367,22 @@ func (status *StatusManager) getLastPodState() (map[types.NamespacedName]daemons
 		deploymentStates[ds.NamespacedName] = ds
 	}
 
-	return daemonsetStates, deploymentStates
+	for _, mcps := range out.MachineConfigPoolStates {
+		machineConfigPoolStates[mcps.NamespacedName] = mcps
+	}
+
+	return daemonsetStates, deploymentStates, machineConfigPoolStates
 }
 
-func (status *StatusManager) setLastPodState(
+func (status *StatusManager) setLastRolloutState(
 	dss map[types.NamespacedName]daemonsetState,
-	deps map[types.NamespacedName]deploymentState) error {
+	deps map[types.NamespacedName]deploymentState,
+	mcps map[types.NamespacedName]machineConfigPoolState) error {
 
-	ps := podState{
-		DaemonsetStates:  make([]daemonsetState, 0, len(dss)),
-		DeploymentStates: make([]deploymentState, 0, len(deps)),
+	ps := rolloutState{
+		DaemonsetStates:         make([]daemonsetState, 0, len(dss)),
+		DeploymentStates:        make([]deploymentState, 0, len(deps)),
+		MachineConfigPoolStates: make([]machineConfigPoolState, 0, len(mcps)),
 	}
 
 	for nsn, ds := range dss {
@@ -297,6 +393,11 @@ func (status *StatusManager) setLastPodState(
 	for nsn, ds := range deps {
 		ds.NamespacedName = nsn
 		ps.DeploymentStates = append(ps.DeploymentStates, ds)
+	}
+
+	for nsn, ms := range mcps {
+		ms.NamespacedName = nsn
+		ps.MachineConfigPoolStates = append(ps.MachineConfigPoolStates, ms)
 	}
 
 	lsbytes, err := json.Marshal(ps)

@@ -57,6 +57,7 @@ type StatusManager struct {
 
 	daemonSets     []types.NamespacedName
 	deployments    []types.NamespacedName
+	machineConfigs []types.NamespacedName
 	relatedObjects []configv1.ObjectReference
 }
 
@@ -322,6 +323,12 @@ func (status *StatusManager) SetDeployments(deployments []types.NamespacedName) 
 	status.Lock()
 	defer status.Unlock()
 	status.deployments = deployments
+}
+
+func (status *StatusManager) SetMachineConfigs(machineConfigs []types.NamespacedName) {
+	status.Lock()
+	defer status.Unlock()
+	status.machineConfigs = machineConfigs
 }
 
 func (status *StatusManager) SetRelatedObjects(relatedObjects []configv1.ObjectReference) {
